@@ -1,0 +1,57 @@
+# hosts.txt: handle hosts, i.e. domains that give out handles to unrelated people.
+#
+# An account whose handle is one of these domains, or ends in .<domain>, gets
+# customDomain = FALSE. Every other valid handle counts as a custom domain (TRUE).
+#
+# One domain per line. Blank lines and anything after # are ignored.
+# "*.bsky.social", ".bsky.social" and "bsky.social" all mean the same thing.
+#
+# Built 2026-11-06 from 18,825 accounts sampled via Bluesky search. The number
+# after each entry is how many sampled accounts used it. There is no official
+# directory of handle hosts, so add any new ones you come across.
+#
+# Domains an organisation uses for its own staff, desks or brands (bsky.team,
+# ft.com, house.gov, theguardian.com, afp.com ...) are deliberately NOT listed:
+# those accounts really do have a custom domain, so they stay TRUE.
+
+# Bluesky's default
+bsky.social          # 15,342
+
+# Bridges from other networks (fediverse via ap.brid.gy, websites via web.brid.gy)
+brid.gy              # 478
+wafrn.net            # 3   Wafrn (handles under at.app.wafrn.net)
+
+# Independent account hosts that issue handles to their users
+eurosky.social       # 253
+blacksky.app         # 49
+wsocial.eu           # 13  W Social; e.g. afp.wsocial.eu is not AFP's own domain
+myatproto.social     # 8
+northsky.social      # 6
+tngl.sh              # 3   Tangled
+selfhosted.social    # 2
+mu.social            # 2
+
+# Community handle services (fandoms, professions, interests)
+swifties.social      # 47
+medsky.social        # 5
+vtubers.social       # 5
+atiny.social         # 2
+
+# Unofficial accounts under a third party's domain
+altgov.info          # 5   unofficial "alt" government accounts
+skyfleet.blue        # 3   e.g. japantimes.skyfleet.blue is not the Japan Times' domain
+
+# Free website platforms: the subdomain belongs to the platform, not the user
+itch.io              # 10
+substack.com         # 6
+bandcamp.com         # 3
+neocities.org        # 3
+# Not seen in the sample, added because they give out free subdomains:
+github.io
+tumblr.com
+wordpress.com
+blogspot.com
+carrd.co
+netlify.app
+pages.dev
+vercel.app

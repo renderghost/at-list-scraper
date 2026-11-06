@@ -28,10 +28,11 @@ end
 module AtListScraper
   ROOT         = __dir__
   LISTS_PATH   = File.join(ROOT, 'lists.md')
+  HOSTS_PATH   = File.join(ROOT, 'hosts.txt')
   CSV_PATH     = File.join(ROOT, 'accounts.csv')
   APPVIEW      = ENV.fetch('BSKY_APPVIEW', 'https://public.api.bsky.app')
   PROFILE_BASE = 'https://mu.social/profile/'
-  COLUMNS      = %w[did alias handle displayName description profileUrl].freeze
+  COLUMNS      = %w[did alias handle displayName description verified verifiedBy customDomain profileUrl].freeze
   PAGE_SIZE    = 100
   MAX_ATTEMPTS = 4
   USER_AGENT   = 'at-list-scraper/1.0 (+https://github.com/renderghost/at-list-scraper)'
@@ -50,7 +51,13 @@ module AtListScraper
     accepted. Blank lines and lines starting with # are ignored. Anything else is
     reported as an error, with its line number.
 
+    hosts.txt: domains that hand out handles to anyone (bsky.social, brid.gy, ...),
+    one per line. Accounts with a handle under one of them get customDomain FALSE.
+
     accounts.csv columns: #{COLUMNS.join(', ')}
+      verified      TRUE if the account currently has a valid Bluesky verification
+      verifiedBy    who verified it (e.g. bsky.app), several joined with " | "
+      customDomain  TRUE if the handle is not under a domain listed in hosts.txt
 
     Exit codes:
       0    every list scraped
@@ -400,14 +407,14 @@ module AtListScraper
       [entries, problems, duplicates]
     end
 
-    def read(path)
+    def read(path, missing: nil)
       raw = File.binread(path)
       text = raw.force_encoding(Encoding::UTF_8).delete_prefix("﻿")
       raise FatalError, "#{File.basename(path)} isn't valid UTF-8 text." unless text.valid_encoding?
 
       text
     rescue Errno::ENOENT
-      raise FatalError, "#{File.basename(path)} not found. Create #{path} with one list URL per line."
+      raise FatalError, "#{File.basename(path)} not found. #{missing || "Create #{path} with one list URL per line."}"
     rescue Errno::EISDIR
       raise FatalError, "#{path} is a directory, not a file."
     rescue SystemCallError => e
@@ -444,6 +451,56 @@ module AtListScraper
       when %r{/profile/[^/]+/?\z}i then 'this is a profile URL, not a list'
       else "not a list URL; #{EXPECTED}"
       end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # hosts.txt: domains whose subdomain handles are not custom domains
+  # ---------------------------------------------------------------------------
+  class Hosts
+    attr_reader :size
+
+    # Strict: any bad line stops the run, because a typo here would silently
+    # write wrong customDomain values into an append-only file.
+    def self.load(path)
+      text = ListsFile.read(path, missing: 'It lists the handle hosts (bsky.social, brid.gy, ...) used to decide ' \
+                                           "customDomain. Restore it from the repository, or create #{path}.")
+      domains = Set.new
+      problems = []
+      text.each_line.with_index(1) do |raw, number|
+        line = raw.sub(/#.*/, '').strip
+        next if line.empty?
+
+        domain = line.downcase.sub(/\A\*?\./, '')
+        if domain =~ /\s/
+          problems << "  line #{number}: one domain per line (got #{line.inspect})"
+        elsif domain !~ ListsFile::HANDLE
+          problems << "  line #{number}: #{line.inspect} isn't a domain name"
+        else
+          domains << domain
+        end
+      end
+
+      unless problems.empty?
+        raise FatalError, "#{File.basename(path)} has #{problems.size == 1 ? 'a line' : 'lines'} " \
+                          "that aren't domains:\n#{problems.join("\n")}"
+      end
+      if domains.empty?
+        raise FatalError, "#{File.basename(path)} lists no domains. Add at least bsky.social, one per line."
+      end
+
+      new(domains)
+    end
+
+    def initialize(domains)
+      @domains = domains
+      @size = domains.size
+    end
+
+    # True when the handle is a listed domain or any subdomain of one.
+    def hosted?(handle)
+      labels = handle.downcase.split('.')
+      (0...labels.size).any? { |i| @domains.include?(labels[i..-1].join('.')) }
     end
   end
 
@@ -543,10 +600,12 @@ module AtListScraper
       found = Array(header).map { |cell| cell.to_s.strip }
       return if found == COLUMNS
 
-      raise FatalError, "#{@name} has different columns from the ones this script writes.\n" \
+      older = !found.empty? && (found - COLUMNS).empty?
+      raise FatalError, "#{@name} has different columns from the ones this script writes" \
+                        "#{older ? ' (it was made by an older version)' : ''}.\n" \
                         "  found:    #{found.join(',')}\n" \
                         "  expected: #{COLUMNS.join(',')}\n" \
-                        'Move the file aside (or fix its header) and re-run.'
+                        'Move the file aside (e.g. rename it to accounts-old.csv) and re-run to start a fresh one.'
     end
   end
 
@@ -554,10 +613,11 @@ module AtListScraper
   # The scrape itself
   # ---------------------------------------------------------------------------
   class Scraper
-    def initialize(ui:, client:, store:)
+    def initialize(ui:, client:, store:, hosts:)
       @ui = ui
       @client = client
       @store = store
+      @hosts = hosts
       @owners = {}   # handle => DID, or the ListError it raised
       @done = {}     # list AT-URI => lines.md line number
       @stats = Hash.new(0)
@@ -580,15 +640,21 @@ module AtListScraper
 
       info, members = fetch_list(uri, entry, tag)
       title = list_title(info)
-      added, already, repeated = save(members)
+      rows, already, repeated = save(members)
+      added = rows.size
+      verified = rows.count { |row| row[COLUMNS.index('verified')] == 'TRUE' }
+      custom = rows.count { |row| row[COLUMNS.index('customDomain')] == 'TRUE' }
 
       @stats[:lists_ok] += 1
       @stats[:fetched] += members.size
       @stats[:added] += added
       @stats[:already] += already
       @stats[:repeated] += repeated
+      @stats[:verified] += verified
+      @stats[:custom_domain] += custom
 
       parts = ["#{added} new"]
+      parts << "#{verified} verified, #{custom} custom domain" if added.positive?
       parts << "#{already} already saved" if already.positive?
       parts << "#{repeated} on an earlier list" if repeated.positive?
       @ui.say "#{@ui.green('✓')} #{tag} #{title}: #{plural(members.size, 'member')} " \
@@ -670,7 +736,7 @@ module AtListScraper
       raise ListError, "the API rejected the request: #{e.message} (#{e.detail})"
     end
 
-    # Appends members not seen before. Returns [added, already_saved, repeated].
+    # Appends members not seen before. Returns [rows_added, already_saved, repeated].
     def save(members)
       rows = []
       batch = Set.new
@@ -689,15 +755,17 @@ module AtListScraper
       end
 
       @store.append(rows)
-      [rows.size, already, repeated]
+      [rows, already, repeated]
     end
 
+    # Must stay in the same order as COLUMNS.
     def row_for(subject)
       did = subject['did']
-      handle = subject['handle'].to_s
+      handle = subject['handle'].to_s.downcase
       valid = !handle.empty? && handle != 'handle.invalid'
       @stats[:invalid_handles] += 1 unless valid
       handle = 'handle.invalid' if handle.empty?
+      verified, verified_by = verification(subject['verification'])
 
       [
         did,
@@ -705,8 +773,26 @@ module AtListScraper
         "@#{handle}",
         flatten(subject['displayName']),
         flatten(subject['description']),
+        boolean(verified),
+        verified_by,
+        boolean(valid && !@hosts.hosted?(handle)),
         "#{PROFILE_BASE}#{did}"
       ]
+    end
+
+    # Verified only while Bluesky rates it valid now. A verification lapses if
+    # the account changes its handle or display name. Returns [bool, issuers].
+    def verification(data)
+      return [false, ''] unless data.is_a?(Hash) && data['verifiedStatus'] == 'valid'
+
+      issuers = Array(data['verifications']).select { |v| v.is_a?(Hash) && v['isValid'] }
+                                            .map { |v| flatten(v['issuerHandle'] || v['issuer']) }
+                                            .reject(&:empty?).uniq
+      [true, issuers.join(' | ')]
+    end
+
+    def boolean(value)
+      value ? 'TRUE' : 'FALSE'
     end
 
     def list_title(info)
@@ -766,6 +852,7 @@ module AtListScraper
 
     begin
       client = Client.new(APPVIEW)
+      hosts = Hosts.load(HOSTS_PATH)
       entries, line_problems, duplicates = ListsFile.parse(LISTS_PATH)
       ui.say ui.bold("lists.md: #{number(entries.size)} list#{entries.size == 1 ? '' : 's'} to scrape")
       line_problems.each do |problem|
@@ -783,9 +870,10 @@ module AtListScraper
              else
                'accounts.csv: starting a new file'
              end)
+      ui.say "hosts.txt: #{number(hosts.size)} handle hosts (handles under these are not custom domains)"
       ui.say
 
-      scraper = Scraper.new(ui: ui, client: client, store: store)
+      scraper = Scraper.new(ui: ui, client: client, store: store, hosts: hosts)
       width = entries.size.to_s.length
       entries.each_with_index do |entry, index|
         tag = "[#{(index + 1).to_s.rjust(width)}/#{entries.size}]"
@@ -848,6 +936,10 @@ module AtListScraper
 
     ui.say "  #{number(stats[:fetched]).rjust(7)} members fetched"
     ui.say "  #{number(stats[:added]).rjust(7)} new accounts added to accounts.csv (now #{number(store.size)})"
+    if stats[:added].positive?
+      ui.say "  #{number(stats[:verified]).rjust(7)} of them verified, " \
+             "#{number(stats[:custom_domain])} with a custom domain"
+    end
     ui.say "  #{number(stats[:already]).rjust(7)} already in accounts.csv, skipped" if stats[:already].positive?
     ui.say "  #{number(stats[:repeated]).rjust(7)} on more than one list, saved once" if stats[:repeated].positive?
     if stats[:duplicate_lists].positive?
