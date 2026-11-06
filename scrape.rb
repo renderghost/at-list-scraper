@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 #
-# at-list-scraper: reads Bluesky list URLs from lists.md and appends every
+# at-list-scraper: reads Bluesky list URLs from lists.txt and appends every
 # member not already present to accounts.csv. Ruby standard library only.
 #
 #   ruby scrape.rb          run it
@@ -27,7 +27,7 @@ end
 
 module AtListScraper
   ROOT         = __dir__
-  LISTS_PATH   = File.join(ROOT, 'lists.md')
+  LISTS_PATH   = File.join(ROOT, 'lists.txt')
   HOSTS_PATH   = File.join(ROOT, 'hosts.txt')
   CSV_PATH     = File.join(ROOT, 'accounts.csv')
   APPVIEW      = ENV.fetch('BSKY_APPVIEW', 'https://public.api.bsky.app')
@@ -40,10 +40,10 @@ module AtListScraper
   USAGE = <<~TEXT
     Usage: ruby scrape.rb
 
-    Reads Bluesky list URLs from lists.md and appends every member whose DID is
+    Reads Bluesky list URLs from lists.txt and appends every member whose DID is
     not already in accounts.csv. Both files live next to this script.
 
-    lists.md: one list per line. Any Bluesky-compatible client URL works.
+    lists.txt: one list per line. Any Bluesky-compatible client URL works.
       https://mu.social/profile/aendra.com/lists/3kmsxmhakdw27
       - https://bsky.app/profile/did:plc:kkf4naxqmweop7dv4l2iqqf5/lists/3kmsxmhakdw27
       at://aendra.com/app.bsky.graph.list/3kmsxmhakdw27
@@ -62,7 +62,7 @@ module AtListScraper
     Exit codes:
       0    every list scraped
       1    finished, but some lines or lists failed (see the summary)
-      2    stopped early (missing lists.md, unreadable accounts.csv, network down, ...)
+      2    stopped early (missing lists.txt, unreadable accounts.csv, network down, ...)
       130  interrupted with Ctrl-C (finished lists are already saved)
 
     Environment:
@@ -351,7 +351,7 @@ module AtListScraper
   end
 
   # ---------------------------------------------------------------------------
-  # lists.md parsing (strict: one list per line)
+  # lists.txt parsing (strict: one list per line)
   # ---------------------------------------------------------------------------
   ListEntry = Struct.new(:line, :text, :owner, :rkey) do
     def label
@@ -805,7 +805,7 @@ module AtListScraper
     # One line per account: line breaks and control characters become a space.
     def flatten(value)
       value.to_s.scrub('')
-           .gsub(/[ \t]*[\r\n\u0085  ]+[ \t]*/, ' ')
+           .gsub(/[ \t]*[\r\n\u0085]+[ \t]*/, ' ')
            .gsub(/[[:cntrl:]]/, ' ')
            .strip
     end
@@ -854,7 +854,7 @@ module AtListScraper
       client = Client.new(APPVIEW)
       hosts = Hosts.load(HOSTS_PATH)
       entries, line_problems, duplicates = ListsFile.parse(LISTS_PATH)
-      ui.say ui.bold("lists.md: #{number(entries.size)} list#{entries.size == 1 ? '' : 's'} to scrape")
+      ui.say ui.bold("lists.txt: #{number(entries.size)} list#{entries.size == 1 ? '' : 's'} to scrape")
       line_problems.each do |problem|
         problems << problem
         ui.say "#{ui.red('✗')} line #{problem.line}: #{problem.reason}\n    #{ui.dim(problem.text)}"
@@ -862,7 +862,7 @@ module AtListScraper
       duplicates.each do |line, first|
         ui.say ui.yellow("! line #{line}: same list as line #{first}; skipped")
       end
-      raise FatalError, 'lists.md has no valid list URLs; nothing to scrape.' if entries.empty?
+      raise FatalError, 'lists.txt has no valid list URLs; nothing to scrape.' if entries.empty?
 
       store = AccountStore.new(CSV_PATH).open!
       ui.say(if store.preexisting_count.positive?
@@ -921,7 +921,7 @@ module AtListScraper
     headline = "#{stats[:lists_ok]} of #{plural(entries.size, 'list')} scraped in #{format('%.1f', elapsed)}s"
     extras = []
     extras << "#{failed_lists} failed" if failed_lists.positive?
-    extras << "#{plural(bad_lines, 'line')} in lists.md not understood" if bad_lines.positive?
+    extras << "#{plural(bad_lines, 'line')} in lists.txt not understood" if bad_lines.positive?
     headline += " (#{extras.join(', ')})" unless extras.empty?
 
     if interrupted
@@ -956,7 +956,7 @@ module AtListScraper
     return if problems.empty?
 
     ui.say
-    ui.say ui.red(ui.bold("#{plural(problems.size, 'problem')}, by lists.md line:"))
+    ui.say ui.red(ui.bold("#{plural(problems.size, 'problem')}, by lists.txt line:"))
     problems.sort_by(&:line).each do |problem|
       ui.say "  line #{problem.line}: #{problem.reason}"
       ui.say "    #{ui.dim(problem.text)}"
